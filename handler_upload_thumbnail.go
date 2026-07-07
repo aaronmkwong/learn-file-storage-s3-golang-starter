@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"io"
+	"encoding/base64"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -32,7 +33,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
-
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
@@ -79,20 +79,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Store the thumbnail in the global in-memory map
-	videoThumbnails[videoID] = thumbnail{
-		data:      imageData,
-		mediaType: mediaType,
-	}
+	// Encode the image bytes as base64 and build a data URL
+	encoded := base64.StdEncoding.EncodeToString(imageData)
+	url := "data:" + mediaType + ";base64," + encoded
 
-	// Build the thumbnail URL and update the video record
-	thumbnailURL := fmt.Sprintf(
-		"http://localhost:%s/api/thumbnails/%s",
-		cfg.port,
-		videoID.String(),
-	)
-
-	video.ThumbnailURL = &thumbnailURL
+	video.ThumbnailURL = &url
 
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
