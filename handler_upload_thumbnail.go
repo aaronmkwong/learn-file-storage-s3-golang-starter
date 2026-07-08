@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"mime"
 	"path/filepath"
 	"strings"
 
@@ -56,10 +57,20 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	// Extract the media type (e.g. image/png)
-	mediaType := fileHeader.Header.Get("Content-Type")
+	// Parse the Content-Type header to determine the media type.
+	mediaType, _, err := mime.ParseMediaType(fileHeader.Header.Get("Content-Type"))
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
+		return
+	}
 
-	// Fetch the video and verify ownership
+	// Only JPEG and PNG thumbnails are allowed.
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Thumbnail must be a JPEG or PNG image", nil)
+		return
+	}
+
+	// Fetch the video and verify ownership.
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Couldn't retrieve video", err)
