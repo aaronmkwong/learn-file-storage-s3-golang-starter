@@ -1,17 +1,20 @@
+
 package main
 
 import (
 	"fmt"
-	"net/http"
 	"io"
-	"encoding/base64"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
 
 func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Request) {
-	
+
 	// Parse the video ID from the URL path
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
@@ -37,7 +40,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
 	// Parse the multipart form
-	// Allow up to 10 MB of in-memory form data before spilling to disk
 	const maxMemory = 10 << 20 // 10 MB
 
 	err = r.ParseMultipartForm(maxMemory)
@@ -47,7 +49,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Retrieve the uploaded file
-	// The form field must be named "thumbnail"
 	file, fileHeader, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Couldn't retrieve uploaded file", err)
@@ -55,19 +56,10 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	// Extract the media type from the uploaded file's headers
-	// Example: image/png or image/jpeg
+	// Extract the media type (e.g. image/png)
 	mediaType := fileHeader.Header.Get("Content-Type")
 
-	// Read the uploaded image into memory
-	imageData, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't read uploaded file", err)
-		return
-	}
-
 	// Fetch the video and verify ownership
-	// Only the video's owner may upload a thumbnail
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Couldn't retrieve video", err)
@@ -79,9 +71,42 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Encode the image bytes as base64 and build a data URL
-	encoded := base64.StdEncoding.EncodeToString(imageData)
-	url := "data:" + mediaType + ";base64," + encoded
+	// Determine the file extension from the Content-Type header.
+	// Examples:
+	// image/png  -> png
+	// image/jpeg -> jpeg
+	parts := strings.Split(mediaType, "/")
+	if len(parts) != 2 {
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", nil)
+		return
+	}
+	extension := parts[1]
+
+	// Build the full path where the thumbnail will be stored.
+	fileName := fmt.Sprintf("%s.%s", videoID.String(), extension)
+	filePath := filepath.Join(cfg.assetsRoot, fileName)
+
+	// Create the destination file.
+	dst, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create thumbnail file", err)
+		return
+	}
+	defer dst.Close()
+
+	// Copy the uploaded file directly to disk.
+	_, err = io.Copy(dst, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't save thumbnail", err)
+		return
+	}
+
+	// Build the URL that will be served by the /assets file server.
+	url := fmt.Sprintf(
+		"http://localhost:%s/assets/%s",
+		cfg.port,
+		fileName,
+	)
 
 	video.ThumbnailURL = &url
 
@@ -91,6 +116,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Return the updated video
+	// Return the updated video.
 	respondWithJSON(w, http.StatusOK, video)
 }
