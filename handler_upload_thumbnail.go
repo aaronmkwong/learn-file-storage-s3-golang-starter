@@ -1,14 +1,14 @@
-
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
-	"mime"
 	"path/filepath"
-	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -82,19 +82,28 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Determine the file extension from the Content-Type header.
-	// Examples:
-	// image/png  -> png
-	// image/jpeg -> jpeg
-	parts := strings.Split(mediaType, "/")
-	if len(parts) != 2 {
-		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", nil)
+	// Determine the file extension from the validated media type.
+	var extension string
+	switch mediaType {
+	case "image/jpeg":
+		extension = "jpeg"
+	case "image/png":
+		extension = "png"
+	}
+
+	// Generate a cryptographically secure random filename.
+	randomBytes := make([]byte, 32)
+	_, err = rand.Read(randomBytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate filename", err)
 		return
 	}
-	extension := parts[1]
+
+	// Convert the random bytes to a URL-safe base64 string.
+	randomName := base64.RawURLEncoding.EncodeToString(randomBytes)
 
 	// Build the full path where the thumbnail will be stored.
-	fileName := fmt.Sprintf("%s.%s", videoID.String(), extension)
+	fileName := fmt.Sprintf("%s.%s", randomName, extension)
 	filePath := filepath.Join(cfg.assetsRoot, fileName)
 
 	// Create the destination file.
@@ -121,6 +130,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	video.ThumbnailURL = &url
 
+	// Persist the updated thumbnail URL.
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
