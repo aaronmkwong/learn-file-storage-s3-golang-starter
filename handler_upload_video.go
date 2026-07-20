@@ -1,19 +1,106 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+// getVideoAspectRatio uses ffprobe to inspect a video file and returns
+// one of three aspect-ratio classifications:
+//
+//   - "16:9"
+//   - "9:16"
+//   - "other"
+//
+// The function searches specifically for a video stream rather than
+// assuming that the first stream returned by ffprobe is the video stream.
+func getVideoAspectRatio(filePath string) (string, error) {
+
+	// Run ffprobe and request stream metadata in JSON format.
+	cmd := exec.Command(
+		"ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_streams",
+		filePath,
+	)
+
+	// Capture ffprobe's standard output in a buffer.
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	// Execute the ffprobe command.
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	// Define the subset of ffprobe's JSON output that we need.
+	// ffprobe may return multiple streams, such as video, audio, and
+	// subtitles, so CodecType identifies the video stream.
+	var probeData struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			Width     int    `json:"width"`
+			Height    int    `json:"height"`
+		} `json:"streams"`
+	}
+
+	// Parse ffprobe's JSON output.
+	err = json.Unmarshal(stdout.Bytes(), &probeData)
+	if err != nil {
+		return "", err
+	}
+
+	// Search through all streams and process only the video stream.
+	for _, stream := range probeData.Streams {
+		if stream.CodecType != "video" {
+			continue
+		}
+
+		// Avoid division by zero if ffprobe returns an invalid height.
+		if stream.Height == 0 {
+			return "other", nil
+		}
+
+		// Calculate the video's width-to-height ratio.
+		ratio := float64(stream.Width) / float64(stream.Height)
+
+		// Allow a small tolerance because video dimensions may be slightly
+		// different from the exact mathematical ratio.
+		const tolerance = 0.01
+
+		// 16:9 landscape video.
+		if math.Abs(ratio-(16.0/9.0)) < tolerance {
+			return "16:9", nil
+		}
+
+		// 9:16 portrait video.
+		if math.Abs(ratio-(9.0/16.0)) < tolerance {
+			return "9:16", nil
+		}
+
+		// A valid video stream was found, but it is neither 16:9 nor 9:16.
+		return "other", nil
+	}
+
+	// No video stream was found.
+	return "other", nil
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 
@@ -90,7 +177,8 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Close executes before Remove because defers are LIFO.
+	// Defer cleanup of the temporary file.
+	// Defers execute in LIFO order, so Close runs before Remove.
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
@@ -101,15 +189,27 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Reset the file pointer so S3 reads from the beginning.
-	_, err = tempFile.Seek(0, io.SeekStart)
+	// Determine the video's aspect ratio.
+	// ffprobe opens the file independently using its path, so no Seek is
+	// required before this call.
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't rewind temporary file", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't determine video aspect ratio", err)
 		return
 	}
 
+	// Assign an S3 key prefix based on the video's aspect ratio.
+	var aspectPrefix string
+	switch aspectRatio {
+	case "16:9":
+		aspectPrefix = "landscape"
+	case "9:16":
+		aspectPrefix = "portrait"
+	default:
+		aspectPrefix = "other"
+	}
+
 	// Generate a random 32-byte object key encoded as hexadecimal.
-	// Final format: <64-character-hex-string>.mp4
 	randomBytes := make([]byte, 32)
 	_, err = rand.Read(randomBytes)
 	if err != nil {
@@ -117,9 +217,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	objectKey := hex.EncodeToString(randomBytes) + ".mp4"
+	// Use "/" to create an S3 key prefix.
+	// Example: landscape/<64-character-hex-string>.mp4
+	objectKey := fmt.Sprintf(
+		"%s/%s.mp4",
+		aspectPrefix,
+		hex.EncodeToString(randomBytes),
+	)
 
-	// Upload the file to Amazon S3.
+	// Reset the temporary file pointer before uploading to S3.
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't rewind temporary file", err)
+		return
+	}
+
+	// Upload the video to Amazon S3.
 	_, err = cfg.s3Client.PutObject(
 		context.TODO(),
 		&s3.PutObjectInput{
