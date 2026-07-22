@@ -19,13 +19,51 @@ import (
 	"github.com/google/uuid"
 )
 
+// processVideoForFastStart creates a new MP4 file optimized for "fast start" playback.
+// Fast start moves the MP4 metadata (the moov atom) toward the beginning
+// of the file, allowing playback to begin before the entire video has
+// finished downloading.
+func processVideoForFastStart(filePath string) (string, error) {
+
+	// Create the output path by appending ".processing" to the
+	// original temporary file path.
+	outputFilePath := filePath + ".processing"
+
+	// Run ffmpeg with stream copying enabled.
+	// -i          input file
+	// -c copy     copy the existing audio/video streams without re-encoding
+	// -movflags   faststart; move MP4 metadata to the beginning of the file
+	// -f mp4      force the output format to MP4
+	cmd := exec.Command(
+		"ffmpeg",
+		"-i", filePath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		"-f", "mp4",
+		outputFilePath,
+	)
+
+	// Capture ffmpeg's diagnostic output.
+	// ffmpeg writes most of its logs and errors to stderr.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	// Execute ffmpeg.
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf(
+			"ffmpeg failed: %w: %s",
+			err,
+			stderr.String(),
+		)
+	}
+
+	// Return the path to the processed file.
+	return outputFilePath, nil
+}
+
 // getVideoAspectRatio uses ffprobe to inspect a video file and returns
-// one of three aspect-ratio classifications:
-//
-//   - "16:9"
-//   - "9:16"
-//   - "other"
-//
+// one of three aspect-ratio classifications: "16:9", "9:16", "other"
 // The function searches specifically for a video stream rather than
 // assuming that the first stream returned by ffprobe is the video stream.
 func getVideoAspectRatio(filePath string) (string, error) {
@@ -189,6 +227,21 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Process the video for fast-start playback.
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't process video for fast start",
+			err,
+		)
+		return
+	}
+
+	// Ensure the processed file is removed after the request completes.
+	defer os.Remove(processedFilePath)
+
 	// Determine the video's aspect ratio.
 	// ffprobe opens the file independently using its path, so no Seek is
 	// required before this call.
@@ -209,6 +262,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		aspectPrefix = "other"
 	}
 
+	// Open the processed file for uploading to S3.
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't open processed video",
+			err,
+		)
+		return
+	}
+	defer processedFile.Close()
+
 	// Generate a random 32-byte object key encoded as hexadecimal.
 	randomBytes := make([]byte, 32)
 	_, err = rand.Read(randomBytes)
@@ -225,25 +291,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		hex.EncodeToString(randomBytes),
 	)
 
-	// Reset the temporary file pointer before uploading to S3.
-	_, err = tempFile.Seek(0, io.SeekStart)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't rewind temporary file", err)
-		return
-	}
-
-	// Upload the video to Amazon S3.
+	// Upload the processed video to Amazon S3.
 	_, err = cfg.s3Client.PutObject(
 		context.TODO(),
 		&s3.PutObjectInput{
 			Bucket:      &cfg.s3Bucket,
 			Key:         &objectKey,
-			Body:        tempFile,
+			Body:        processedFile,
 			ContentType: &mediaType,
 		},
 	)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't upload video to S3", err)
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't upload video to S3",
+			err,
+		)
 		return
 	}
 
@@ -259,7 +323,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't update video metadata", err)
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't update video metadata",
+			err,
+		)
 		return
 	}
 
