@@ -311,11 +311,11 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Build the S3 URL and save it to the video record.
+	// Store the S3 bucket and object key in the database.
+	// Presigned URLs are intentionally not stored because they expire.
 	videoURL := fmt.Sprintf(
-		"https://%s.s3.%s.amazonaws.com/%s",
+		"%s,%s",
 		cfg.s3Bucket,
-		cfg.s3Region,
 		objectKey,
 	)
 
@@ -332,6 +332,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Return the updated video metadata.
-	respondWithJSON(w, http.StatusOK, video)
+	// Convert the database video into a response video containing
+	// a temporary presigned URL.
+	signedVideo, err := cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't generate signed video URL",
+			err,
+		)
+		return
+	}
+
+	// Return the video with the temporary signed URL.
+	respondWithJSON(w, http.StatusOK, signedVideo)
 }
