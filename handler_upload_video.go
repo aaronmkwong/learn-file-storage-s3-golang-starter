@@ -311,16 +311,18 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Store the S3 bucket and object key in the database.
-	// Presigned URLs are intentionally not stored because they expire.
+	// Build the CloudFront URL for the uploaded video.
+	// The URL is stored directly in the database since CloudFront
+	// serves the video rather than a temporary presigned S3 URL.
 	videoURL := fmt.Sprintf(
-		"%s,%s",
-		cfg.s3Bucket,
+		"%s/%s",
+		cfg.s3CfDistribution,
 		objectKey,
 	)
 
 	video.VideoURL = &videoURL
 
+	// Update the video metadata in the database.
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(
@@ -332,19 +334,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Convert the database video into a response video containing
-	// a temporary presigned URL.
-	signedVideo, err := cfg.dbVideoToSignedVideo(video)
-	if err != nil {
-		respondWithError(
-			w,
-			http.StatusInternalServerError,
-			"Couldn't generate signed video URL",
-			err,
-		)
-		return
-	}
-
-	// Return the video with the temporary signed URL.
-	respondWithJSON(w, http.StatusOK, signedVideo)
+	// Return the updated video metadata.
+	respondWithJSON(w, http.StatusOK, video)
+	
 }

@@ -125,20 +125,9 @@ func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert the stored S3 bucket/key into a temporary presigned URL.
-	signedVideo, err := cfg.dbVideoToSignedVideo(video)
-	if err != nil {
-		respondWithError(
-			w,
-			http.StatusInternalServerError,
-			"Couldn't generate signed video URL",
-			err,
-		)
-		return
-	}
-
-	// Return the video with its temporary presigned URL.
-	respondWithJSON(w, http.StatusOK, signedVideo)
+	// Return the video metadata.
+	// The VideoURL already contains the CloudFront URL.
+	respondWithJSON(w, http.StatusOK, video)
 }
 
 // handlerVideosRetrieve retrieves all videos belonging to the
@@ -166,25 +155,8 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Convert each database video, which stores the S3 bucket and key,
-	// into a video containing a temporary presigned URL.
-	signedVideos := make([]database.Video, 0, len(videos))
+	// Return the user's videos.
+	// Each VideoURL already contains the CloudFront URL.
+	respondWithJSON(w, http.StatusOK, videos)
 
-	for _, video := range videos {
-		signedVideo, err := cfg.dbVideoToSignedVideo(video)
-		if err != nil {
-			respondWithError(
-				w,
-				http.StatusInternalServerError,
-				"Couldn't generate signed video URL",
-				err,
-			)
-			return
-		}
-
-		signedVideos = append(signedVideos, signedVideo)
-	}
-
-	// Return the videos with temporary presigned URLs.
-	respondWithJSON(w, http.StatusOK, signedVideos)
 }
